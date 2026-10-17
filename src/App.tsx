@@ -12,6 +12,7 @@ type Entry = {
   createdAt: string
   updatedBy: string
   updatedAt: string
+  image?: string
 }
 
 type Audit = {
@@ -55,7 +56,14 @@ const defaultWorkers: Worker[] = [
 
 
 const now = () => new Date().toLocaleString('en-IN')
-const today = () => new Date().toISOString().slice(0, 10)
+const localDate = (date: Date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+const today = () => localDate(new Date())
+const workerPrefixLength = (name: string) => name.length + 3
 
 export default function App() {
   const [owner, setOwner] = useState(
@@ -93,7 +101,12 @@ export default function App() {
   const [workerSalary, setWorkerSalary] = useState('15000')
   const [salaryDay, setSalaryDay] = useState('1')
   const [workerExpense, setWorkerExpense] = useState('')
+  const [advanceWorkerId, setAdvanceWorkerId] = useState(() => {
+    const savedWorkers = JSON.parse(localStorage.getItem('shop_workers') || 'null') as Worker[] | null
+    return savedWorkers?.[0]?.id || defaultWorkers[0]?.id || ''
+  })
   const [entryImage, setEntryImage] = useState<string>('')
+  const [notificationRefresh, setNotificationRefresh] = useState(0)
 
 
 
@@ -115,6 +128,44 @@ export default function App() {
   localStorage.setItem('shop_notices', JSON.stringify(notices))
   }, [notices])
 
+  // Notifications are checked when the app is open. Browser permission is required.
+  useEffect(() => {
+    if (!owner || typeof window === 'undefined' || !('Notification' in window)) return
+    if (Notification.permission !== 'granted') return
+
+    const current = new Date()
+    const tomorrow = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1)
+    const tomorrowDay = tomorrow.getDate()
+    const daysInTomorrowMonth = new Date(tomorrow.getFullYear(), tomorrow.getMonth() + 1, 0).getDate()
+    const dueSalaryWorkers = workers.filter(worker =>
+      Math.min(worker.salaryDay, daysInTomorrowMonth) === tomorrowDay
+    )
+
+    dueSalaryWorkers.forEach(worker => {
+      const key = `shop_notification_salary_${worker.id}_${localDate(tomorrow)}`
+      if (!localStorage.getItem(key)) {
+        new Notification('Salary reminder', {
+          body: `${worker.name}'s salary of ₹${worker.salary.toLocaleString('en-IN')} is due tomorrow.`,
+        })
+        localStorage.setItem(key, 'sent')
+      }
+    })
+
+    notices.filter(notice => !notice.completed).forEach(notice => {
+      const due = new Date(`${notice.date}T${notice.time}`)
+      const hoursUntilDue = (due.getTime() - current.getTime()) / (1000 * 60 * 60)
+      if (hoursUntilDue >= 0 && hoursUntilDue <= 24) {
+        const key = `shop_notification_notice_${notice.id}_${notice.date}_${notice.time}`
+        if (!localStorage.getItem(key)) {
+          new Notification('Notice due soon', {
+            body: `${notice.title} — due ${notice.date} at ${notice.time}`,
+          })
+          localStorage.setItem(key, 'sent')
+        }
+      }
+    })
+  }, [owner, workers, notices, notificationRefresh])
+
 
   function login(e: React.FormEvent) {
     e.preventDefault()
@@ -134,12 +185,22 @@ export default function App() {
     setType('Expense')
     setDetails('')
     setAmount('')
+    setEntryImage('')
+    setAdvanceWorkerId(workers[0]?.id || '')
   }
 
   function saveEntry(e: React.FormEvent) {
     e.preventDefault()
     if (!details.trim() || Number(amount) <= 0) return
 
+    const selectedAdvanceWorker = workers.find(worker => worker.id === advanceWorkerId)
+    if (type === 'Worker Advance' && !selectedAdvanceWorker) {
+      alert('Please select a worker for this advance.')
+      return
+    }
+    const savedDetails = type === 'Worker Advance'
+      ? `${selectedAdvanceWorker!.name} | ${details.trim()}`
+      : details.trim()
     const time = now()
 
     if (editing) {
@@ -149,7 +210,7 @@ export default function App() {
       const changes = [
         old.date !== date ? `Date: ${old.date} → ${date}` : '',
         old.type !== type ? `Type: ${old.type} → ${type}` : '',
-        old.details !== details ? `Details: ${old.details} → ${details}` : '',
+        old.details !== savedDetails ? `Details: ${old.details} → ${savedDetails}` : '',
         old.amount !== Number(amount)
           ? `Amount: ₹${old.amount} → ₹${Number(amount)}`
           : '',
@@ -162,7 +223,7 @@ export default function App() {
 
       setEntries(prev => prev.map(x =>
         x.id === editing
-          ? { ...x, date, type, details, amount: Number(amount),
+          ? { ...x, date, type, details: savedDetails, amount: Number(amount), image: entryImage || x.image,
               updatedBy: owner, updatedAt: time }
           : x
       ))
@@ -178,8 +239,8 @@ export default function App() {
     } else {
       const id = crypto.randomUUID()
       setEntries(prev => [{
-        id, date, type, details: details.trim(),
-        amount: Number(amount), createdBy: owner,
+        id, date, type, details: savedDetails,
+        amount: Number(amount), image: entryImage || undefined, createdBy: owner,
         createdAt: time, updatedBy: '', updatedAt: '',
       }, ...prev])
 
@@ -189,7 +250,7 @@ export default function App() {
         action: 'Created',
         by: owner,
         time,
-        changes: `${type}: ${details.trim()}, ₹${Number(amount)}`,
+        changes: `${type}: ${savedDetails}, ₹${Number(amount)}`, 
       }, ...prev])
     }
 
@@ -202,8 +263,15 @@ const editEntry = (entry: Entry) => {
   setEditing(entry.id)
   setDate(entry.date)
   setType(entry.type)
-  setDetails(entry.details)
+  if (entry.type === 'Worker Advance') {
+    const match = workers.find(worker => entry.details.startsWith(worker.name + ' |'))
+    setAdvanceWorkerId(match?.id || workers[0]?.id || '')
+    setDetails(match ? entry.details.slice(workerPrefixLength(match.name)).trim() : entry.details)
+  } else {
+    setDetails(entry.details)
+  }
   setAmount(String(entry.amount))
+  setEntryImage(entry.image || '')
 }
 
   
@@ -289,6 +357,55 @@ const editEntry = (entry: Entry) => {
                 </div>
               ))}
             </div>
+            <div className="mt-6 rounded-2xl bg-white p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold">Notifications & Reminders</h3>
+                  <p className="mt-1 text-sm text-slate-500">Salary reminders are checked one day before payday; notices are checked during the 24 hours before they are due.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!('Notification' in window)) {
+                      alert('Browser notifications are not supported in this browser.')
+                      return
+                    }
+                    const permission = await Notification.requestPermission()
+                    if (permission === 'granted') {
+                      setNotificationRefresh(value => value + 1)
+                      new Notification('ShopManager notifications enabled', { body: 'You can receive reminders while this website is open.' })
+                    } else {
+                      alert('Notifications were not enabled. Please allow them in your browser site settings.')
+                    }
+                  }}
+                  className="rounded-xl bg-blue-600 px-4 py-2 text-white"
+                >
+                  Enable Notifications
+                </button>
+              </div>
+              <div className="mt-4 space-y-2">
+                {(() => {
+                  const current = new Date()
+                  const tomorrow = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1)
+                  const tomorrowDay = tomorrow.getDate()
+                  const daysInMonth = new Date(tomorrow.getFullYear(), tomorrow.getMonth() + 1, 0).getDate()
+                  const dueWorkers = workers.filter(worker => Math.min(worker.salaryDay, daysInMonth) === tomorrowDay)
+                  const dueNotices = notices.filter(notice => {
+                    if (notice.completed) return false
+                    const due = new Date(`${notice.date}T${notice.time}`)
+                    const hours = (due.getTime() - current.getTime()) / 3600000
+                    return hours >= 0 && hours <= 24
+                  })
+                  if (!dueWorkers.length && !dueNotices.length) {
+                    return <p className="text-sm text-slate-500">No reminders due in the next 24 hours.</p>
+                  }
+                  return <>
+                    {dueWorkers.map(worker => <p key={worker.id} className="rounded-lg bg-amber-50 p-3 text-sm">🔔 {worker.name}'s salary (₹{worker.salary.toLocaleString('en-IN')}) is due tomorrow.</p>)}
+                    {dueNotices.map(notice => <p key={notice.id} className="rounded-lg bg-blue-50 p-3 text-sm">📌 {notice.title} — due {notice.date} at {notice.time}.</p>)}
+                  </>
+                })()}
+              </div>
+            </div>
             <button onClick={() => { resetForm(); setPage('Transactions') }}
               className="mt-6 bg-blue-600 text-white rounded-xl p-3">
               + Add New Entry
@@ -320,9 +437,26 @@ const editEntry = (entry: Entry) => {
                 <option>Customer Payment</option>
               </select>
 
+              {type === 'Worker Advance' && (
+                <div>
+                  <label className="mb-1 block text-sm">Worker</label>
+                  <select
+                    value={advanceWorkerId}
+                    onChange={e => setAdvanceWorkerId(e.target.value)}
+                    required
+                    className="border rounded-xl p-3 w-full"
+                  >
+                    {workers.map(worker => (
+                      <option key={worker.id} value={worker.id}>{worker.name}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-slate-500">This advance will be deducted from the selected worker's remaining salary.</p>
+                </div>
+              )}
+
               <input required value={details}
                 onChange={e => setDetails(e.target.value)}
-                placeholder="Details / worker / supplier"
+                placeholder={type === 'Worker Advance' ? 'Reason (e.g. personal advance)' : 'Details / supplier / customer'}
                 className="border rounded-xl p-3 w-full" />
 
               <input required type="number" min="0.01" step="0.01"
@@ -412,6 +546,7 @@ const editEntry = (entry: Entry) => {
                     </div>
                     <p className="font-bold">₹{entry.amount.toLocaleString('en-IN')}</p>
                   </div>
+                  {entry.image && <img src={entry.image} alt="Receipt" className="mt-3 h-32 rounded-lg border object-contain" />}
                   <p className="text-xs text-slate-500 mt-3">
                     Entered by {entry.createdBy} · {entry.createdAt}
                   </p>
@@ -523,17 +658,12 @@ const editEntry = (entry: Entry) => {
 
     {workers.map(worker => {
       const todayDate = new Date()
-      const monthStart = new Date(
-        todayDate.getFullYear(),
-        todayDate.getMonth(),
-        1
-      ).toISOString().slice(0, 10)
-
-      const monthEnd = new Date(
-        todayDate.getFullYear(),
-        todayDate.getMonth() + 1,
-        1
-      ).toISOString().slice(0, 10)
+      const monthStart = localDate(new Date(
+        todayDate.getFullYear(), todayDate.getMonth(), 1
+      ))
+      const monthEnd = localDate(new Date(
+        todayDate.getFullYear(), todayDate.getMonth() + 1, 1
+      ))
 
       const workerEntries = entries.filter(entry =>
         entry.type === 'Worker Advance' &&
